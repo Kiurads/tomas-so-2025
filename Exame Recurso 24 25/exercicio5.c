@@ -2,156 +2,157 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <pthread.h>
 
-int main()
+#define MAX_APPS 50
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
+pid_t pids[MAX_APPS];
+
+typedef struct
 {
-    char comando[100];
-    char *ficheiro = getenv("LOG_FILE");
+    pthread_t thread;
+    pid_t pid;
+    pid_t *pidApps;
+} DadosAplicacao;
 
-    if (ficheiro == NULL)
+void recebeAlarme(int signum)
+{
+    pthread_mutex_lock(&mutex);
+
+    for (int i = 0; i < MAX_APPS; i++)
     {
-        fprintf(stderr, "A variável de ambiente LOG_FILE não está definida.\n");
-        exit(EXIT_FAILURE);
+        if (pids[i] > 0)
+        {
+            kill(pids[i], SIGTERM);
+        }
     }
+
+    pthread_mutex_unlock(&mutex);
+
+    printf("0");
+}
+
+void *leituraApp1(void *arg)
+{
+    int fd = *(int *)arg;
+    int bytesRead;
+    char pidBuffer[100];
+
+    while ((bytesRead = read(fd, pidBuffer, sizeof(pidBuffer))) > 0)
+    {
+        printf("App1 output [%d bytes]: %s\n", bytesRead, pidBuffer);
+    }
+
+    return NULL;
+}
+
+void *aguardaAplicacao(void *arg)
+{
+    DadosAplicacao *dados = (DadosAplicacao *)arg;
+    int status;
+    int seconds = 0;
 
     while (1)
     {
-        printf("Digite um comando (ou 'sair' para encerrar): ");
-        fgets(comando, sizeof(comando), stdin);
+        pid_t result = waitpid(dados->pid, &status, WNOHANG);
 
-        // Remover o caractere de nova linha do final da string
-        comando[strcspn(comando, "\n")] = 0;
-
-        if (strcmp(comando, "sair") == 0)
+        if (result == 0)
         {
-            break;
+            sleep(1);
+            seconds++;
+            continue;
         }
-
-        if (strcmp(comando, "luzes") == 0)
+        else if (result == -1)
         {
-            int fd[2];
-            pipe(fd);
-
-            char cor[50];
-            char tempo[50];
-
-            printf("Digite a cor das luzes: ");
-            fgets(cor, sizeof(cor), stdin);
-            cor[strcspn(cor, "\n")] = 0;
-
-            printf("Digite o tempo de duração (em segundos): ");
-            fgets(tempo, sizeof(tempo), stdin);
-            tempo[strcspn(tempo, "\n")] = 0;
-
-            int pid = fork();
-
-            if (pid == 0)
-            {
-                // Inicio alinea b
-                dup2(fd[1], STDOUT_FILENO);
-
-                close(fd[0]);
-                close(fd[1]);
-                // Fim alinea b
-
-                char *argv[] = {"./luzes", cor, tempo, NULL};
-                execv("./luzes", argv);
-                perror("Erro no execv.\n");
-                exit(EXIT_FAILURE);
-            }
-            else
-            {
-                // Inicio alinea b
-                char buffer[100];
-
-                close(fd[1]);
-
-                read(fd[0], buffer, sizeof(buffer));
-                printf("Mensagem do processo cortinas: %s\n", buffer);
-
-                saveToFile(ficheiro, buffer, strlen(buffer));
-                // Fim alinea b
-
-                waitpid(pid, NULL, 0);
-            }
-        }
-        else if (strcmp(comando, "cortinas") == 0)
-        {
-            int fd[2];
-            pipe(fd);
-
-            int pid = fork();
-
-            if (pid == 0)
-            {
-                // Inicio alinea b
-                dup2(fd[1], STDOUT_FILENO);
-
-                close(fd[0]);
-                close(fd[1]);
-                // Fim alinea b
-
-                char *argv[] = {"./cortinas", NULL};
-                execv("./cortinas", argv);
-                perror("Erro no execv.\n");
-                exit(EXIT_FAILURE);
-            }
-            else
-            {
-                // Inicio alinea b
-                char buffer[100];
-
-                close(fd[1]);
-
-                read(fd[0], buffer, sizeof(buffer));
-                printf("Mensagem do processo cortinas: %s\n", buffer);
-
-                saveToFile(ficheiro, buffer, strlen(buffer));
-                // Fim alinea b
-
-                waitpid(pid, NULL, 0);
-            }
-        }
-        else if (strcmp(comando, "som") == 0)
-        {
-            int fd[2];
-            pipe(fd);
-
-            int pid = fork();
-
-            if (pid == 0)
-            {
-                // Inicio alinea b
-                dup2(fd[1], STDOUT_FILENO);
-
-                close(fd[0]);
-                close(fd[1]);
-                // Fim alinea b
-
-                char *argv[] = {"./som", NULL};
-                execv("./som", argv);
-                perror("Erro no execv.\n");
-                exit(EXIT_FAILURE);
-            }
-            else
-            {
-                // Inicio alinea b
-                char buffer[100];
-
-                close(fd[1]);
-
-                read(fd[0], buffer, sizeof(buffer));
-                printf("Mensagem do processo som: %s\n", buffer);
-
-                saveToFile(ficheiro, buffer, strlen(buffer));
-                // Fim alinea b
-
-                waitpid(pid, NULL, 0);
-            }
+            perror("waitpid");
+            return NULL;
         }
         else
         {
-            printf("Comando desconhecido: %s\n", comando);
+            break;
         }
     }
+
+    if (WIFSIGNALED(status))
+    {
+        return NULL;
+    }
+
+    printf("Aplicacao com PID %d terminou em %d segundos.\n", dados->pid, seconds);
+
+    pthread_mutex_lock(&mutex);
+
+    for (int i = 0; i < MAX_APPS; i++)
+    {
+        if (dados->pidApps[i] != dados->pid)
+        {
+            kill(dados->pidApps[i], SIGTERM);
+        }
+    }
+
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
+}
+
+int main(int argc, char *argv[])
+{
+    // Alinea a)
+    DadosAplicacao dados[MAX_APPS];
+    int numApps = argc - 1;
+
+    // Alinea c)
+    pthread_t threadLeitura;
+    int fd[2];
+
+    pipe(fd);
+
+    for (int i = 0; i < numApps; i++)
+    {
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            // Alinea c)
+            if (i == 0)
+            {
+                close(fd[0]);
+                dup2(fd[1], STDOUT_FILENO);
+                close(fd[1]);
+            }
+
+            execlp(argv[i + 1], argv[i + 1], NULL);
+        }
+        else
+        {
+            // Alinea c)
+            if (i == 0)
+            {
+                close(fd[1]);
+                pthread_create(&threadLeitura, NULL, (void *)leituraApp1, &fd[0]);
+                close(fd[0]);
+            }
+
+            dados[i].pid = pid;
+
+            dados[i].pidApps = pids;
+
+            pthread_create(&dados[i].thread, NULL, aguardaAplicacao, &dados[i]);
+        }
+    }
+
+    // Alinea b)
+    int tempoInt = atoi(getenv("TEMPO"));
+
+    signal(SIGALRM, recebeAlarme);
+
+    alarm(tempoInt);
+
+    return EXIT_SUCCESS;
 }
